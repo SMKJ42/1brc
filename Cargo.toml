@@ -1,0 +1,8 @@
+[package]
+name = "rust1brc"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1.39.1", features = ["full"] }
+bytes = { version = "1.6.1" }
