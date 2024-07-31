@@ -7,7 +7,7 @@ use std::{fs::File, io::Error, sync::Arc};
 
 use rust1brc::{get_data_path, StationData};
 
-const CHUNK_SIZE: usize = 1024 * 512;
+const CHUNK_SIZE: usize = 1024 * 1024;
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
