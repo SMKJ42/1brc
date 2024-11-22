@@ -9,28 +9,17 @@ pub fn get_data_path() -> String {
     return "data/".to_string() + source + ".txt";
 }
 
-#[derive(Debug)]
-pub struct StationDataItem {
-    pub temperature: f64,
-}
-
-impl Display for StationDataItem {
-    fn fmt(&self, f: &mut Formatter) -> Result<(), std::fmt::Error> {
-        write!(f, "{}", self.temperature)
-    }
-}
-
 #[derive(PartialEq, Debug, Clone)]
 pub struct StationData {
     station: String,
     count: usize,
-    min: f64,
-    max: f64,
-    sum: f64,
+    min: i64,
+    max: i64,
+    sum: i64,
 }
 
 impl StationData {
-    pub fn new(station: String, temp: f64) -> Self {
+    pub fn new(station: String, temp: i64) -> Self {
         Self {
             station,
             count: 1,
@@ -40,31 +29,27 @@ impl StationData {
         }
     }
 
-    pub fn insert(&mut self, temperature: f64) {
+    pub fn add_temp_data(&mut self, temperature: i64) {
         self.min = self.min.min(temperature);
         self.max = self.max.max(temperature);
         self.sum += temperature;
         self.count += 1;
     }
 
-    pub fn merge(&mut self, other: Self) {
-        self.min = self.min.min(other.min);
-        self.max = self.max.max(other.max);
-        self.sum += other.sum;
-        self.count += other.count;
+    fn calculate_mean(&self) -> i64 {
+        return self.sum / self.count as i64;
     }
+}
 
-    fn calculate_mean(&self) -> f64 {
-        return self.sum / self.count as f64;
-    }
-
-    pub fn to_string(&self) -> String {
-        format!(
+impl Display for StationData {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
             "{}={}/{}/{}",
             self.station,
-            self.min,
-            self.max,
-            self.calculate_mean()
+            self.min as f32 / 10000.,
+            self.max as f32 / 10000.,
+            self.calculate_mean() as f32 / 10000.
         )
     }
 }
