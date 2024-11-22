@@ -1,9 +1,9 @@
 use core::str;
-use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek};
 use std::time::Instant;
 
+use hashbrown::HashMap;
 use rust1brc::{get_data_path, StationData};
 
 const CHUNK_SIZE: usize = 1024 * 1024 * 4;
@@ -14,7 +14,7 @@ fn main() {
     let path = get_data_path();
     let mut file = File::open(path).unwrap();
     let mut offset = 0;
-    let mut stations: HashMap<String, StationData> = HashMap::new();
+    let mut stations = HashMap::new();
 
     let mut buf = [0; CHUNK_SIZE];
     loop {
@@ -48,8 +48,6 @@ fn main() {
         parse_data(&mut reader, &mut stations);
     }
 
-    let end = Instant::now();
-
     let mut all: Vec<_> = stations.into_iter().collect();
     all.sort_unstable_by(|a, b| a.0.cmp(&b.0));
 
@@ -57,7 +55,7 @@ fn main() {
         println!("{}", station);
     }
 
-    println!("num stations: {}", all.len());
+    let end = Instant::now();
 
     println!("time elapsed {}", end.duration_since(start).as_millis());
 }

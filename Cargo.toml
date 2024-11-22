@@ -8,3 +8,7 @@ path = "src/lib.rs"
 
 [profile.release]
 debug = true
+
+[dependencies]
+hashbrown = "0.15.1"
+
