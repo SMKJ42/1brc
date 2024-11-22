@@ -51,8 +51,8 @@ fn main() {
     let mut all: Vec<_> = stations.into_iter().collect();
     all.sort_unstable_by(|a, b| a.0.cmp(&b.0));
 
-    for (_, station) in all.iter() {
-        println!("{}", station);
+    for (station_name, station_data) in all.iter() {
+        println!("{}={}", station_name, station_data);
     }
 
     let end = Instant::now();
@@ -69,7 +69,7 @@ fn parse_data(reader: &mut Reader, stations: &mut HashMap<String, StationData>) 
         } else {
             let station_name = station_name.to_string();
             let temp = reader.read_temp();
-            let station = StationData::new(station_name.clone(), temp);
+            let station = StationData::new(temp);
             stations.insert(station_name, station);
         }
     }
@@ -87,6 +87,7 @@ impl<'a> Reader<'a> {
 
     fn read_str(&mut self) -> &str {
         let mut last = self.pos;
+
         while last < self.buf.len() && self.buf[last] != b';' {
             last += 1;
         }
@@ -107,7 +108,6 @@ impl<'a> Reader<'a> {
             neg = false;
         }
 
-        // ew...
         while self.has_remaining() && self.buf[self.pos] != 0xA {
             debug_assert!(!(self.pos >= self.buf.len()));
             if self.buf[self.pos] != b'.' {

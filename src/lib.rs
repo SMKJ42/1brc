@@ -11,7 +11,6 @@ pub fn get_data_path() -> String {
 
 #[derive(PartialEq, Debug, Clone)]
 pub struct StationData {
-    station: String,
     count: usize,
     min: i64,
     max: i64,
@@ -19,9 +18,8 @@ pub struct StationData {
 }
 
 impl StationData {
-    pub fn new(station: String, temp: i64) -> Self {
+    pub fn new(temp: i64) -> Self {
         Self {
-            station,
             count: 1,
             min: temp,
             max: temp,
@@ -45,11 +43,10 @@ impl Display for StationData {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{}={}/{}/{}",
-            self.station,
-            self.min as f32 / 10000.,
-            self.max as f32 / 10000.,
-            self.calculate_mean() as f32 / 10000.
+            "{:.1}/{:.1}/{:.1}",
+            self.min as f32 / 10.,
+            self.max as f32 / 10.,
+            self.calculate_mean() as f32 / 10.
         )
     }
 }

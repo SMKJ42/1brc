@@ -2,7 +2,7 @@
 
 To test out the project yourself, simply run `cargo run --release light` in your terminal.
 
-To get a flamegraph, run `sudo cargo --profile release flamegraph -- full` in your terminal
+To get a flamegraph, run `sudo cargo flamegraph --profile release -- full` in your terminal
 
 If you want to check out how to produce the full 1 billion rows, follow this link
 
