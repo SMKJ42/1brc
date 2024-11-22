@@ -1,16 +1,15 @@
 use core::str;
 use std::collections::HashMap;
+use std::fs::File;
 use std::io::{Read, Seek};
 use std::time::Instant;
-use std::{fs::File, io::Error};
 
 use rust1brc::{get_data_path, StationData};
 
 const CHUNK_SIZE: usize = 1024 * 1024 * 4;
 // const CHUNK_SIZE: usize = ;
 
-#[tokio::main]
-async fn main() -> Result<(), Error> {
+fn main() {
     let start = Instant::now();
     let path = get_data_path();
     let mut file = File::open(path).unwrap();
@@ -61,8 +60,6 @@ async fn main() -> Result<(), Error> {
     println!("num stations: {}", all.len());
 
     println!("time elapsed {}", end.duration_since(start).as_millis());
-
-    Ok(())
 }
 
 fn parse_data(reader: &mut Reader, stations: &mut HashMap<String, StationData>) {
@@ -94,7 +91,7 @@ impl<'a> Reader<'a> {
             last += 1;
         }
 
-        let str = str::from_utf8(&self.buf[self.pos..last]).unwrap();
+        let str = unsafe { str::from_utf8_unchecked(&self.buf[self.pos..last]) };
         self.pos = last + 1;
         return str.to_string();
     }
