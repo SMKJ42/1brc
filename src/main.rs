@@ -4,10 +4,8 @@ use std::io::{Read, Seek};
 use std::time::Instant;
 
 use hashbrown::HashMap;
-use rust1brc::{get_data_path, StationData};
 
 const CHUNK_SIZE: usize = 1024 * 1024 * 4;
-// const CHUNK_SIZE: usize = ;
 
 fn main() {
     let start = Instant::now();
@@ -124,5 +122,58 @@ impl<'a> Reader<'a> {
 
     fn has_remaining(&self) -> bool {
         return self.pos < self.buf.len();
+    }
+}
+
+use std::fmt::{Display, Formatter};
+
+pub fn get_data_path() -> String {
+    let args = std::env::args().collect::<Vec<String>>();
+    let source = args.get(1).unwrap_or_else(|| {
+        println!("Please provide a file path");
+        std::process::exit(1);
+    });
+    return "data/".to_string() + source + ".txt";
+}
+
+#[derive(PartialEq, Debug, Clone)]
+pub struct StationData {
+    count: usize,
+    min: i64,
+    max: i64,
+    sum: i64,
+}
+
+impl StationData {
+    pub fn new(temp: i64) -> Self {
+        Self {
+            count: 1,
+            min: temp,
+            max: temp,
+            sum: temp,
+        }
+    }
+
+    pub fn add_temp_data(&mut self, temperature: i64) {
+        self.min = self.min.min(temperature);
+        self.max = self.max.max(temperature);
+        self.sum += temperature;
+        self.count += 1;
+    }
+
+    fn calculate_mean(&self) -> i64 {
+        return self.sum / self.count as i64;
+    }
+}
+
+impl Display for StationData {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{:.1}/{:.1}/{:.1}",
+            self.min as f32 / 10.,
+            self.max as f32 / 10.,
+            self.calculate_mean() as f32 / 10.
+        )
     }
 }
