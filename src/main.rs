@@ -65,10 +65,12 @@ fn main() {
 fn parse_data(reader: &mut Reader, stations: &mut HashMap<String, StationData>) {
     while reader.has_remaining() {
         let station_name = reader.read_str();
-        let temp = reader.read_temp();
-        if let Some(station) = stations.get_mut(&station_name) {
+        if let Some(station) = stations.get_mut(station_name) {
+            let temp = reader.read_temp();
             station.add_temp_data(temp);
         } else {
+            let station_name = station_name.to_string();
+            let temp = reader.read_temp();
             let station = StationData::new(station_name.clone(), temp);
             stations.insert(station_name, station);
         }
@@ -85,7 +87,7 @@ impl<'a> Reader<'a> {
         return Self { buf, pos: 0 };
     }
 
-    fn read_str(&mut self) -> String {
+    fn read_str(&mut self) -> &str {
         let mut last = self.pos;
         while last < self.buf.len() && self.buf[last] != b';' {
             last += 1;
@@ -93,7 +95,7 @@ impl<'a> Reader<'a> {
 
         let str = unsafe { str::from_utf8_unchecked(&self.buf[self.pos..last]) };
         self.pos = last + 1;
-        return str.to_string();
+        return str;
     }
 
     fn read_temp(&mut self) -> i64 {
