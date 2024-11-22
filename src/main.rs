@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use hashbrown::HashMap;
 
-const CHUNK_SIZE: usize = 1024 * 1024 * 4;
+const CHUNK_SIZE: usize = 1024 * 1024 * 5;
 
 fn main() {
     let start = Instant::now();
