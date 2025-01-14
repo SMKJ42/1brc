@@ -9,4 +9,5 @@ debug = true
 
 [dependencies]
 hashbrown = "0.15.1"
+tokio = { version = "1.43.0", features = ["full"] }
 
