@@ -1,16 +1,15 @@
 use std::cell::RefCell;
-use std::io::SeekFrom;
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
 use std::iter::Peekable;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 use std::{str, usize};
 
 use hashbrown::HashMap;
-use tokio::fs::File;
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
-const CHUNK_SIZE: u64 = 1024 * 1024 * 16;
-const THREAD_COUNT: usize = 12;
+const CHUNK_SIZE: u64 = 1024 * 1024 * 64;
+const THREAD_COUNT: usize = 16;
 const PEEK: usize = 100;
 
 #[inline]
@@ -19,9 +18,9 @@ async fn main() {
     let path = get_data_path();
     let start = Instant::now();
 
-    let mut file = File::open(path.clone()).await.unwrap();
+    let mut file = File::open(path.clone()).unwrap();
 
-    let file_len = file.metadata().await.unwrap().len();
+    let file_len = file.metadata().unwrap().len();
 
     let stations: Arc<RwLock<HashMap<Vec<u8>, Arc<Mutex<StationData>>>>> =
         Arc::new(RwLock::new(HashMap::new()));
@@ -61,8 +60,8 @@ async fn align_chunks(file: &mut File, file_len: u64) -> Vec<u64> {
     let mut chunk_offsets = vec![0];
 
     while offset < file_len {
-        file.seek(std::io::SeekFrom::Start(offset)).await.unwrap();
-        file.read(&mut scan_buf).await.unwrap();
+        file.seek(std::io::SeekFrom::Start(offset)).unwrap();
+        file.read(&mut scan_buf).unwrap();
 
         let mut found_delimeter = false;
         for (idx, ch) in scan_buf.iter().rev().enumerate() {
@@ -103,7 +102,7 @@ async fn align_chunks(file: &mut File, file_len: u64) -> Vec<u64> {
     }
 
     // reset the file back to start.
-    file.seek(SeekFrom::Start(0)).await.unwrap();
+    file.seek(SeekFrom::Start(0)).unwrap();
 
     return out;
 }
@@ -125,7 +124,7 @@ async fn read_chunks<'a>(
 
         let mut buf = vec![0; len];
 
-        file.read_exact(&mut buf).await.unwrap();
+        file.read_exact(&mut buf).unwrap();
         let reader = Reader::new(buf);
         chunks.push(RefCell::new(reader));
     }
