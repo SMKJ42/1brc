@@ -174,11 +174,13 @@ async fn align_chunks(file: &mut File, file_len: u64) -> Vec<Alignment> {
 fn parse_chunk(reader: &mut Reader, stations: &mut StationMap) {
     while reader.has_remaining() {
         let station_name = reader.read_station_name();
-        let temp = reader.read_temp();
 
-        if let Some(station) = stations.inner.get_mut(&station_name) {
+        if let Some(station) = stations.inner.get_mut(station_name) {
+            let temp = reader.read_temp();
             station.add_temp_data(temp);
         } else {
+            let station_name = station_name.to_owned();
+            let temp = reader.read_temp();
             let station = StationData::new(temp);
             stations.insert(station_name.to_vec(), station);
         }
@@ -298,7 +300,7 @@ impl Reader {
     }
 
     #[inline]
-    fn read_station_name(&mut self) -> Vec<u8> {
+    fn read_station_name<'a>(&'a mut self) -> &[u8] {
         let mut last = self.pos;
 
         while last < self.buf.len() {
@@ -310,7 +312,7 @@ impl Reader {
 
         let str = &self.buf[self.pos..last];
         self.pos = last + 1;
-        return str.to_vec();
+        return str;
     }
 
     #[inline]
