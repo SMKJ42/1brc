@@ -1,48 +1,68 @@
 use std::cell::RefCell;
-use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::SeekFrom;
 use std::iter::Peekable;
+use std::pin::Pin;
+use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Mutex, RwLock};
+use std::task::Poll;
 use std::time::Instant;
 use std::{str, usize};
 
+use futures::{Stream, StreamExt};
 use hashbrown::HashMap;
+use tokio::fs::File;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use tokio::task::JoinHandle;
 
 const CHUNK_SIZE: u64 = 1024 * 1024 * 64;
 const THREAD_COUNT: usize = 16;
 const PEEK: usize = 100;
 
 #[inline]
-fn main() {
+#[tokio::main]
+async fn main() {
     let path = get_data_path();
     let start = Instant::now();
 
-    let mut file = File::open(path.clone()).unwrap();
+    let mut file = File::open(path.clone()).await.unwrap();
 
-    let file_len = file.metadata().unwrap().len();
+    let file_len = file.metadata().await.unwrap().len();
 
-    let stations: Arc<RwLock<HashMap<Vec<u8>, Arc<Mutex<StationData>>>>> =
-        Arc::new(RwLock::new(HashMap::new()));
+    let mut stations = StationMap::new();
+    let delims = align_chunks(&mut file, file_len).await;
 
-    let delims = align_chunks(&mut file, file_len);
+    let chunks = AlignmentStream::new(delims);
 
-    let mut delims_iter = Box::new(delims.iter()).peekable();
+    let (tx, rx) = std::sync::mpsc::sync_channel(THREAD_COUNT * 4);
+    let mut thread_pool = Vec::new();
 
+    for _ in 0..THREAD_COUNT {
+        thread_pool.push(dispatch_thread(&chunks, &tx, path.clone()));
+    }
+
+    let mut ackd = 0;
     let mut total = 0;
 
-    while delims_iter.peek().is_some() {
-        let mut chunks = read_chunks(&mut file, &mut delims_iter);
-
-        total += chunks.len();
-
-        parse_chunks(&mut chunks, &stations);
+    while ackd < THREAD_COUNT {
+        let data = rx.recv().unwrap();
+        match data {
+            ChannelSignal::Data(data) => {
+                for station in &data.inner {
+                    total += station.1.count;
+                }
+                stations.combine(data);
+            }
+            ChannelSignal::End => {
+                ackd += 1;
+            }
+        }
     }
 
     print_out(stations);
 
     println!(
         "total chunks: {}, processed chunks: {}",
-        delims.len(),
+        chunks.inner.len(),
         total
     );
 
@@ -53,14 +73,45 @@ fn main() {
 }
 
 #[inline]
-fn align_chunks(file: &mut File, file_len: u64) -> Vec<u64> {
+fn dispatch_thread(
+    chunks: &AlignmentStream,
+    tx: &SyncSender<ChannelSignal>,
+    path: String,
+) -> JoinHandle<()> {
+    let tx = tx.clone();
+    let path = path.clone();
+    let mut chunks = chunks.clone();
+    tokio::spawn(async move {
+        loop {
+            let mut buf: Vec<u8>;
+            if let Some(chunk) = chunks.next().await {
+                let mut file = File::open(&path).await.unwrap();
+                file.seek(chunk.start()).await.unwrap();
+                let size = (chunk.end - chunk.start) as usize;
+                buf = vec![0; size];
+                file.read_exact(&mut buf).await.unwrap();
+            } else {
+                tx.send(ChannelSignal::End).unwrap();
+                return;
+            }
+
+            let mut reader = Reader::new(buf);
+            let mut stations = StationMap::new();
+            parse_chunk(&mut reader, &mut stations);
+            tx.send(ChannelSignal::Data(stations)).unwrap();
+        }
+    })
+}
+
+#[inline]
+async fn align_chunks(file: &mut File, file_len: u64) -> Vec<Alignment> {
     let mut offset = CHUNK_SIZE;
     let mut scan_buf = [0; PEEK];
     let mut chunk_offsets = vec![0];
 
     while offset < file_len {
-        file.seek(std::io::SeekFrom::Start(offset)).unwrap();
-        file.read(&mut scan_buf).unwrap();
+        file.seek(std::io::SeekFrom::Start(offset)).await.unwrap();
+        file.read(&mut scan_buf).await.unwrap();
 
         let mut found_delimeter = false;
         for (idx, ch) in scan_buf.iter().rev().enumerate() {
@@ -84,104 +135,107 @@ fn align_chunks(file: &mut File, file_len: u64) -> Vec<u64> {
     let mut prev = chunk_offsets[0];
 
     // turn the index of the delimeters into a iterator of distances.
-    let mut out: Vec<u64> = chunk_offsets
+    let mut out: Vec<Alignment> = chunk_offsets
         .iter()
         .skip(1)
         .map(move |curr| {
-            let test = curr - prev;
+            let align = Alignment {
+                start: prev,
+                end: *curr,
+            };
             prev = *curr;
-            return test;
+            return align;
         })
         .collect();
 
     // if we failed to align the last chunk, which is likely, push it to the output.
     if offset != file_len {
         let last = chunk_offsets[chunk_offsets.len() - 1];
-        out.push(file_len - last);
+        out.push(Alignment {
+            start: last,
+            end: file_len,
+        })
     }
 
     // reset the file back to start.
-    file.seek(SeekFrom::Start(0)).unwrap();
+    file.seek(SeekFrom::Start(0)).await.unwrap();
 
     return out;
 }
 
-#[inline]
-fn read_chunks<'a>(
-    file: &mut File,
-    delims_iter: &mut Peekable<Box<std::slice::Iter<'a, u64>>>,
-) -> Vec<RefCell<Reader>> {
-    let mut chunks: Vec<RefCell<Reader>> = Vec::new();
+#[derive(Clone)]
+struct AlignmentStream {
+    inner: Pin<Vec<Alignment>>,
+    idx: Arc<Mutex<usize>>,
+}
 
-    for _ in 0..THREAD_COUNT {
-        let len: usize;
-        if let Some(delim) = delims_iter.next() {
-            len = *delim as usize;
+impl AlignmentStream {
+    #[inline]
+    fn new(inner: Vec<Alignment>) -> Self {
+        return Self {
+            inner: Pin::new(inner),
+            idx: Arc::new(Mutex::new(0)),
+        };
+    }
+}
+
+impl Stream for AlignmentStream {
+    type Item = Alignment;
+
+    #[inline]
+    fn poll_next(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        let mut idx = self.idx.lock().unwrap();
+
+        if *idx < self.inner.len() {
+            let out = self.inner[*idx].clone();
+            *idx += 1;
+            return Poll::Ready(Some(out));
         } else {
-            break;
+            return Poll::Ready(None);
         }
-
-        let mut buf = vec![0; len];
-
-        file.read_exact(&mut buf).unwrap();
-        let reader = Reader::new(buf);
-        chunks.push(RefCell::new(reader));
     }
 
-    return chunks;
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        return (*self.idx.lock().unwrap(), Some(self.inner.len()));
+    }
 }
 
-#[inline]
-fn parse_chunks(
-    chunks: &mut Vec<RefCell<Reader>>,
-    stations: &Arc<RwLock<HashMap<Vec<u8>, Arc<Mutex<StationData>>>>>,
-) {
-    let mut futs = Vec::new();
+enum ChannelSignal {
+    End,
+    Data(StationMap),
+}
 
-    for chunk in chunks.iter() {
-        let stations = stations.clone();
-        let mut chunk = chunk.take();
+#[derive(Clone)]
+struct Alignment {
+    start: u64,
+    end: u64,
+}
 
-        let handle = std::thread::spawn(move || {
-            let mut t_stations = HashMap::new();
-
-            parse_chunk(&mut chunk, &mut t_stations);
-
-            let mut stations_read = stations.read().unwrap();
-
-            for (name, data) in t_stations {
-                if let Some(station) = stations_read.get(&name) {
-                    let mut station = station.lock().unwrap();
-                    station.combine(&data);
-                } else {
-                    drop(stations_read);
-                    stations
-                        .write()
-                        .unwrap()
-                        .insert(name, Arc::new(Mutex::new(data)));
-                    stations_read = stations.read().unwrap();
-                };
-            }
-        });
-
-        futs.push(handle);
+impl Alignment {
+    #[inline]
+    fn start(&self) -> SeekFrom {
+        return SeekFrom::Start(self.start);
     }
 
-    for fut in futs {
-        fut.join().unwrap();
+    #[inline]
+    fn end(&self) -> SeekFrom {
+        return SeekFrom::Start(self.end);
     }
 }
 
 #[inline]
-fn parse_chunk(reader: &mut Reader, stations: &mut HashMap<Vec<u8>, StationData>) {
+fn parse_chunk(reader: &mut Reader, stations: &mut StationMap) {
     while reader.has_remaining() {
         let station_name = reader.read_station_name();
+        let temp = reader.read_temp();
 
-        if let Some(station) = stations.get_mut(&station_name) {
-            let temp = reader.read_temp();
+        if let Some(station) = stations.inner.get_mut(&station_name) {
             station.add_temp_data(temp);
         } else {
-            let temp = reader.read_temp();
             let station = StationData::new(temp);
             stations.insert(station_name.to_vec(), station);
         }
@@ -189,15 +243,11 @@ fn parse_chunk(reader: &mut Reader, stations: &mut HashMap<Vec<u8>, StationData>
 }
 
 #[inline]
-fn print_out(stations: Arc<RwLock<HashMap<Vec<u8>, Arc<Mutex<StationData>>>>>) {
+fn print_out(stations: StationMap) {
     let mut sum: usize = 0;
 
-    let all = stations.read().unwrap();
-    let mut all: Vec<_> = all
-        .clone()
-        .into_iter()
-        .map(|x| (x.0, x.1.lock().unwrap().clone()))
-        .collect();
+    let all = stations.inner;
+    let mut all: Vec<_> = all.clone().into_iter().map(|x| (x.0, x.1)).collect();
 
     all.sort_unstable_by(|a, b| a.0.cmp(&b.0));
 
@@ -300,6 +350,34 @@ pub struct StationData {
     sum: i64,
 }
 
+struct StationMap {
+    inner: HashMap<Vec<u8>, StationData>,
+}
+
+impl StationMap {
+    fn new() -> Self {
+        return Self {
+            inner: HashMap::new(),
+        };
+    }
+
+    #[inline]
+    fn combine(&mut self, other: Self) {
+        for (name, data) in other.inner {
+            self.insert(name, data);
+        }
+    }
+
+    #[inline]
+    fn insert(&mut self, name: Vec<u8>, data: StationData) {
+        if let Some(station) = self.inner.get_mut(&name) {
+            station.combine(&data);
+        } else {
+            self.inner.insert(name, data);
+        };
+    }
+}
+
 impl StationData {
     pub fn new(temp: i64) -> Self {
         Self {
@@ -318,6 +396,7 @@ impl StationData {
         self.sum += temperature;
     }
 
+    #[inline]
     fn calculate_mean(&self) -> i64 {
         return self.sum / self.count as i64;
     }
