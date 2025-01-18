@@ -1,75 +1,81 @@
-use std::cell::RefCell;
+use std::fmt::{Display, Formatter};
 use std::io::SeekFrom;
-use std::iter::Peekable;
 use std::pin::Pin;
 use std::sync::mpsc::SyncSender;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 use std::task::Poll;
 use std::time::Instant;
 use std::{str, usize};
 
 use futures::{Stream, StreamExt};
+
 use hashbrown::HashMap;
+
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use tokio::runtime::Builder;
 use tokio::task::JoinHandle;
 
-const CHUNK_SIZE: u64 = 1024 * 1024 * 64;
+const CHUNK_SIZE: u64 = 1024 * 1024 * 32;
 const THREAD_COUNT: usize = 16;
 const PEEK: usize = 100;
 
 #[inline]
-#[tokio::main]
-async fn main() {
+fn main() {
     let path = get_data_path();
     let start = Instant::now();
 
-    let mut file = File::open(path.clone()).await.unwrap();
+    let mut builder = Builder::new_multi_thread();
+    builder.worker_threads(THREAD_COUNT);
+    builder.enable_all();
 
-    let file_len = file.metadata().await.unwrap().len();
+    let rt = builder.build().unwrap();
 
-    let mut stations = StationMap::new();
-    let delims = align_chunks(&mut file, file_len).await;
+    rt.block_on(async move {
+        let mut file = File::open(path.clone()).await.unwrap();
+        let file_len = file.metadata().await.unwrap().len();
 
-    let chunks = AlignmentStream::new(delims);
+        let mut stations = StationMap::new();
+        let chunks = AlignmentStream::new(align_chunks(&mut file, file_len).await);
 
-    let (tx, rx) = std::sync::mpsc::sync_channel(THREAD_COUNT * 4);
-    let mut thread_pool = Vec::new();
+        let (tx, rx) = std::sync::mpsc::sync_channel(THREAD_COUNT * 4);
+        let mut thread_pool = Vec::new();
 
-    for _ in 0..THREAD_COUNT {
-        thread_pool.push(dispatch_thread(&chunks, &tx, path.clone()));
-    }
+        for _ in 0..THREAD_COUNT {
+            thread_pool.push(dispatch_thread(&chunks, &tx, path.clone()));
+        }
 
-    let mut ackd = 0;
-    let mut total = 0;
+        let mut ackd = 0;
+        let mut total = 0;
 
-    while ackd < THREAD_COUNT {
-        let data = rx.recv().unwrap();
-        match data {
-            ChannelSignal::Data(data) => {
-                for station in &data.inner {
-                    total += station.1.count;
+        while ackd < THREAD_COUNT {
+            let data = rx.recv().unwrap();
+            match data {
+                ChannelSignal::Data(data) => {
+                    for station in &data.inner {
+                        total += station.1.count;
+                    }
+                    stations.combine(data);
                 }
-                stations.combine(data);
-            }
-            ChannelSignal::End => {
-                ackd += 1;
+                ChannelSignal::End => {
+                    ackd += 1;
+                }
             }
         }
-    }
 
-    print_out(stations);
+        print_out(stations);
 
-    println!(
-        "total chunks: {}, processed chunks: {}",
-        chunks.inner.len(),
-        total
-    );
+        println!(
+            "total chunks: {}, processed chunks: {}",
+            chunks.inner.len(),
+            total
+        );
 
-    println!(
-        "Elapsed: {} ms",
-        Instant::now().duration_since(start).as_millis()
-    );
+        println!(
+            "Elapsed: {} ms",
+            Instant::now().duration_since(start).as_millis()
+        );
+    })
 }
 
 #[inline]
@@ -84,6 +90,7 @@ fn dispatch_thread(
     tokio::spawn(async move {
         loop {
             let mut buf: Vec<u8>;
+            // read in a chunk if one is queued. else, return END signal
             if let Some(chunk) = chunks.next().await {
                 let mut file = File::open(&path).await.unwrap();
                 file.seek(chunk.start()).await.unwrap();
@@ -163,6 +170,57 @@ async fn align_chunks(file: &mut File, file_len: u64) -> Vec<Alignment> {
     return out;
 }
 
+#[inline]
+fn parse_chunk(reader: &mut Reader, stations: &mut StationMap) {
+    while reader.has_remaining() {
+        let station_name = reader.read_station_name();
+        let temp = reader.read_temp();
+
+        if let Some(station) = stations.inner.get_mut(&station_name) {
+            station.add_temp_data(temp);
+        } else {
+            let station = StationData::new(temp);
+            stations.insert(station_name.to_vec(), station);
+        }
+    }
+}
+
+#[inline]
+fn print_out(stations: StationMap) {
+    let mut sum: usize = 0;
+
+    let all = stations.inner;
+    let mut all: Vec<_> = all.clone().into_iter().map(|x| (x.0, x.1)).collect();
+
+    all.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+
+    for (station_name, station_data) in all.into_iter() {
+        sum += station_data.count;
+        println!("{}={station_data}", unsafe {
+            str::from_utf8_unchecked(&station_name)
+        })
+    }
+
+    if sum != 1_000_000_000 {
+        println!(
+            "\r\n*** WARNING: Did not parse all 1bn rows. If you're not testing on the full data set, disreguard.
+    rows parsed: {sum}
+"
+        )
+    } else {
+        println!("\r\nprocessed 1bn lines.")
+    };
+}
+
+pub fn get_data_path() -> String {
+    let args = std::env::args().collect::<Vec<String>>();
+    let source = args.get(1).unwrap_or_else(|| {
+        println!("Please provide a file path");
+        std::process::exit(1);
+    });
+    return "data/".to_string() + source + ".txt";
+}
+
 #[derive(Clone)]
 struct AlignmentStream {
     inner: Pin<Vec<Alignment>>,
@@ -182,6 +240,7 @@ impl AlignmentStream {
 impl Stream for AlignmentStream {
     type Item = Alignment;
 
+    // hackey solution to get an iterator to be Send + Sync
     #[inline]
     fn poll_next(
         self: std::pin::Pin<&mut Self>,
@@ -225,48 +284,6 @@ impl Alignment {
     fn end(&self) -> SeekFrom {
         return SeekFrom::Start(self.end);
     }
-}
-
-#[inline]
-fn parse_chunk(reader: &mut Reader, stations: &mut StationMap) {
-    while reader.has_remaining() {
-        let station_name = reader.read_station_name();
-        let temp = reader.read_temp();
-
-        if let Some(station) = stations.inner.get_mut(&station_name) {
-            station.add_temp_data(temp);
-        } else {
-            let station = StationData::new(temp);
-            stations.insert(station_name.to_vec(), station);
-        }
-    }
-}
-
-#[inline]
-fn print_out(stations: StationMap) {
-    let mut sum: usize = 0;
-
-    let all = stations.inner;
-    let mut all: Vec<_> = all.clone().into_iter().map(|x| (x.0, x.1)).collect();
-
-    all.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-
-    for (station_name, station_data) in all.into_iter() {
-        sum += station_data.count;
-        println!("{}={station_data}", unsafe {
-            str::from_utf8_unchecked(&station_name)
-        })
-    }
-
-    if sum != 1_000_000_000 {
-        println!(
-            "\r\n*** WARNING: Did not parse all 1bn rows. If you're not testing on the full data set, disreguard.
-    rows parsed: {sum}
-"
-        )
-    } else {
-        println!("\r\nprocessed 1bn lines.")
-    };
 }
 
 #[derive(Default)]
@@ -329,17 +346,6 @@ impl Reader {
     fn has_remaining(&self) -> bool {
         return self.pos < self.buf.len();
     }
-}
-
-use std::fmt::{Display, Formatter};
-
-pub fn get_data_path() -> String {
-    let args = std::env::args().collect::<Vec<String>>();
-    let source = args.get(1).unwrap_or_else(|| {
-        println!("Please provide a file path");
-        std::process::exit(1);
-    });
-    return "data/".to_string() + source + ".txt";
 }
 
 #[derive(PartialEq, Debug, Clone)]
