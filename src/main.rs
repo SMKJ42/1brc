@@ -1,23 +1,16 @@
 use std::fmt::{Display, Formatter};
-use std::io::SeekFrom;
-use std::pin::Pin;
-use std::sync::mpsc::SyncSender;
-use std::sync::{Arc, Mutex};
-use std::task::Poll;
-use std::time::Instant;
-use std::{str, usize};
+use std::sync::{mpsc::SyncSender, Arc, Mutex};
+use std::{io::SeekFrom, pin::Pin, str, task::Poll, time::Instant, usize};
 
 use futures::{Stream, StreamExt};
 
 use hashbrown::HashMap;
 
-use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
-use tokio::runtime::Builder;
-use tokio::task::JoinHandle;
+use tokio::{fs::File, runtime::Builder, task::JoinHandle};
 
 const CHUNK_SIZE: u64 = 1024 * 1024 * 32;
-const THREAD_COUNT: usize = 16;
+const THREAD_COUNT: usize = 12;
 const PEEK: usize = 100;
 
 #[inline]
@@ -31,7 +24,7 @@ fn main() {
 
     let rt = builder.build().unwrap();
 
-    rt.block_on(async move {
+    rt.block_on(async {
         let mut file = File::open(path.clone()).await.unwrap();
         let file_len = file.metadata().await.unwrap().len();
 
@@ -47,6 +40,7 @@ fn main() {
 
         let mut ackd = 0;
         let mut total = 0;
+        let mut chunks_count = 0;
 
         while ackd < THREAD_COUNT {
             let data = rx.recv().unwrap();
@@ -55,6 +49,7 @@ fn main() {
                     for station in &data.inner {
                         total += station.1.count;
                     }
+                    chunks_count += 1;
                     stations.combine(data);
                 }
                 ChannelSignal::End => {
@@ -64,17 +59,22 @@ fn main() {
         }
 
         print_out(stations);
-
         println!(
-            "total chunks: {}, processed chunks: {}",
-            chunks.inner.len(),
-            total
-        );
-
-        println!(
-            "Elapsed: {} ms",
+            "\r\nTotal Elapsed time: {} ms",
             Instant::now().duration_since(start).as_millis()
         );
+
+        if total != 1_000_000_000 {
+            println!("\r\n\t*** WARNING: Did not parse all 1bn rows. If you're not testing on the full data set, disreguard.\r\trows parsed: {total}\r\n")
+        } else {
+            println!("\tProcessed 1bn lines.")
+        };
+
+        println!(
+            "\tTotal chunks: {}, Processed chunks: {}",
+            chunks.inner.len(), chunks_count
+        );
+
     })
 }
 
@@ -145,7 +145,7 @@ async fn align_chunks(file: &mut File, file_len: u64) -> Vec<Alignment> {
     let mut out: Vec<Alignment> = chunk_offsets
         .iter()
         .skip(1)
-        .map(move |curr| {
+        .map(|curr| {
             let align = Alignment {
                 start: prev,
                 end: *curr,
@@ -175,14 +175,13 @@ fn parse_chunk(reader: &mut Reader, stations: &mut StationMap) {
     while reader.has_remaining() {
         let station_name = reader.read_station_name();
 
-        if let Some(station) = stations.inner.get_mut(station_name) {
+        if let Some(station) = stations.get_mut(station_name) {
             let temp = reader.read_temp();
             station.add_temp_data(temp);
         } else {
             let station_name = station_name.to_owned();
-            let temp = reader.read_temp();
-            let station = StationData::new(temp);
-            stations.insert(station_name.to_vec(), station);
+            let station = StationData::new(reader.read_temp());
+            stations.insert(station_name, station);
         }
     }
 }
@@ -202,16 +201,6 @@ fn print_out(stations: StationMap) {
             str::from_utf8_unchecked(&station_name)
         })
     }
-
-    if sum != 1_000_000_000 {
-        println!(
-            "\r\n*** WARNING: Did not parse all 1bn rows. If you're not testing on the full data set, disreguard.
-    rows parsed: {sum}
-"
-        )
-    } else {
-        println!("\r\nprocessed 1bn lines.")
-    };
 }
 
 pub fn get_data_path() -> String {
@@ -369,6 +358,10 @@ impl StationMap {
         };
     }
 
+    fn get_mut(&mut self, key: &[u8]) -> Option<&mut StationData> {
+        return self.inner.get_mut(key);
+    }
+
     #[inline]
     fn combine(&mut self, other: Self) {
         for (name, data) in other.inner {
@@ -378,11 +371,7 @@ impl StationMap {
 
     #[inline]
     fn insert(&mut self, name: Vec<u8>, data: StationData) {
-        if let Some(station) = self.inner.get_mut(&name) {
-            station.combine(&data);
-        } else {
-            self.inner.insert(name, data);
-        };
+        self.inner.insert(name, data);
     }
 }
 
