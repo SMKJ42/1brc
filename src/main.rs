@@ -365,7 +365,11 @@ impl StationMap {
     #[inline]
     fn combine(&mut self, other: Self) {
         for (name, data) in other.inner {
-            self.insert(name, data);
+            if let Some(station) = self.inner.get_mut(&name) {
+                station.combine(&data);
+            } else {
+                self.insert(name, data);
+            }
         }
     }
 
