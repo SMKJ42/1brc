@@ -13,8 +13,7 @@ const THREAD_COUNT: usize = 16;
 const PEEK: usize = 100;
 
 #[inline]
-#[tokio::main]
-async fn main() {
+fn main() {
     let path = get_data_path();
     let start = Instant::now();
 
@@ -25,18 +24,18 @@ async fn main() {
     let stations: Arc<RwLock<HashMap<Vec<u8>, Arc<Mutex<StationData>>>>> =
         Arc::new(RwLock::new(HashMap::new()));
 
-    let delims = align_chunks(&mut file, file_len).await;
+    let delims = align_chunks(&mut file, file_len);
 
     let mut delims_iter = Box::new(delims.iter()).peekable();
 
     let mut total = 0;
 
     while delims_iter.peek().is_some() {
-        let mut chunks = read_chunks(&mut file, &mut delims_iter).await;
+        let mut chunks = read_chunks(&mut file, &mut delims_iter);
 
         total += chunks.len();
 
-        parse_chunks(&mut chunks, &stations).await;
+        parse_chunks(&mut chunks, &stations);
     }
 
     print_out(stations);
@@ -54,7 +53,7 @@ async fn main() {
 }
 
 #[inline]
-async fn align_chunks(file: &mut File, file_len: u64) -> Vec<u64> {
+fn align_chunks(file: &mut File, file_len: u64) -> Vec<u64> {
     let mut offset = CHUNK_SIZE;
     let mut scan_buf = [0; PEEK];
     let mut chunk_offsets = vec![0];
@@ -108,7 +107,7 @@ async fn align_chunks(file: &mut File, file_len: u64) -> Vec<u64> {
 }
 
 #[inline]
-async fn read_chunks<'a>(
+fn read_chunks<'a>(
     file: &mut File,
     delims_iter: &mut Peekable<Box<std::slice::Iter<'a, u64>>>,
 ) -> Vec<RefCell<Reader>> {
@@ -133,7 +132,7 @@ async fn read_chunks<'a>(
 }
 
 #[inline]
-async fn parse_chunks(
+fn parse_chunks(
     chunks: &mut Vec<RefCell<Reader>>,
     stations: &Arc<RwLock<HashMap<Vec<u8>, Arc<Mutex<StationData>>>>>,
 ) {
