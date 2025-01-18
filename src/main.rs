@@ -1,4 +1,5 @@
 use std::fmt::{Display, Formatter};
+use std::io::{Read, Seek};
 use std::sync::{mpsc::SyncSender, Arc, Mutex};
 use std::{io::SeekFrom, pin::Pin, str, task::Poll, time::Instant, usize};
 
@@ -15,8 +16,21 @@ const PEEK: usize = 100;
 
 #[inline]
 fn main() {
+    let mut ackd = 0;
+    let mut total = 0;
+    let mut chunks_count = 0;
+
     let path = get_data_path();
     let start = Instant::now();
+
+    let mut file = std::fs::File::open(path.clone()).unwrap();
+    let file_len = file.metadata().unwrap().len();
+
+    let mut stations = StationMap::new();
+    let chunks = AlignmentStream::new(align_chunks(&mut file, file_len));
+
+    let (tx, rx) = std::sync::mpsc::sync_channel(THREAD_COUNT * 4);
+    let mut thread_pool = Vec::new();
 
     let mut builder = Builder::new_multi_thread();
     builder.worker_threads(THREAD_COUNT);
@@ -25,57 +39,43 @@ fn main() {
     let rt = builder.build().unwrap();
 
     rt.block_on(async {
-        let mut file = File::open(path.clone()).await.unwrap();
-        let file_len = file.metadata().await.unwrap().len();
-
-        let mut stations = StationMap::new();
-        let chunks = AlignmentStream::new(align_chunks(&mut file, file_len).await);
-
-        let (tx, rx) = std::sync::mpsc::sync_channel(THREAD_COUNT * 4);
-        let mut thread_pool = Vec::new();
-
         for _ in 0..THREAD_COUNT {
             thread_pool.push(dispatch_thread(&chunks, &tx, path.clone()));
         }
+    });
 
-        let mut ackd = 0;
-        let mut total = 0;
-        let mut chunks_count = 0;
-
-        while ackd < THREAD_COUNT {
-            let data = rx.recv().unwrap();
-            match data {
-                ChannelSignal::Data(data) => {
-                    for station in &data.inner {
-                        total += station.1.count;
-                    }
-                    chunks_count += 1;
-                    stations.combine(data);
+    while ackd < THREAD_COUNT {
+        let data = rx.recv().unwrap();
+        match data {
+            ChannelSignal::Data(data) => {
+                for station in &data.inner {
+                    total += station.1.count;
                 }
-                ChannelSignal::End => {
-                    ackd += 1;
-                }
+                chunks_count += 1;
+                stations.combine(data);
+            }
+            ChannelSignal::End => {
+                ackd += 1;
             }
         }
+    }
+    print_out(stations);
+    println!(
+        "\r\nTotal Elapsed time: {} ms",
+        Instant::now().duration_since(start).as_millis()
+    );
 
-        print_out(stations);
-        println!(
-            "\r\nTotal Elapsed time: {} ms",
-            Instant::now().duration_since(start).as_millis()
-        );
+    if total != 1_000_000_000 {
+        println!("\r\n\t*** WARNING: Did not parse all 1bn rows. If you're not testing on the full data set, disreguard.\r\trows parsed: {total}\r\n")
+    } else {
+        println!("\tProcessed 1bn lines.")
+    };
 
-        if total != 1_000_000_000 {
-            println!("\r\n\t*** WARNING: Did not parse all 1bn rows. If you're not testing on the full data set, disreguard.\r\trows parsed: {total}\r\n")
-        } else {
-            println!("\tProcessed 1bn lines.")
-        };
-
-        println!(
-            "\tTotal chunks: {}, Processed chunks: {}",
-            chunks.inner.len(), chunks_count
-        );
-
-    })
+    println!(
+        "\tTotal chunks: {}, Processed chunks: {}",
+        chunks.inner.len(),
+        chunks_count
+    );
 }
 
 #[inline]
@@ -111,14 +111,14 @@ fn dispatch_thread(
 }
 
 #[inline]
-async fn align_chunks(file: &mut File, file_len: u64) -> Vec<Alignment> {
+fn align_chunks(file: &mut std::fs::File, file_len: u64) -> Vec<Alignment> {
     let mut offset = CHUNK_SIZE;
     let mut scan_buf = [0; PEEK];
     let mut chunk_offsets = vec![0];
 
     while offset < file_len {
-        file.seek(std::io::SeekFrom::Start(offset)).await.unwrap();
-        file.read(&mut scan_buf).await.unwrap();
+        file.seek(std::io::SeekFrom::Start(offset)).unwrap();
+        file.read(&mut scan_buf).unwrap();
 
         let mut found_delimeter = false;
         for (idx, ch) in scan_buf.iter().rev().enumerate() {
@@ -165,7 +165,7 @@ async fn align_chunks(file: &mut File, file_len: u64) -> Vec<Alignment> {
     }
 
     // reset the file back to start.
-    file.seek(SeekFrom::Start(0)).await.unwrap();
+    file.seek(SeekFrom::Start(0)).unwrap();
 
     return out;
 }
